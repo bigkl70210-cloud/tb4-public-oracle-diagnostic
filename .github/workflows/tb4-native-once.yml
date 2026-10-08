@@ -1,0 +1,160 @@
+name: TB4 official pinned native one-shot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tb4-native-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tb4-public-native-one-shot
+  cancel-in-progress: false
+
+jobs:
+  native-diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      TB_PIN: 452bf305c6daa62fc59061d22133a7cbc7c1572e
+      HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Check out only public diagnostic code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Validate standard Linux runner and native Docker engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "push"
+          test "$RUNNER_OS" = "Linux"
+          echo "CPU count: $(nproc)"
+          free -h
+          df -h .
+          docker info --format 'Docker CPUs={{.NCPU}} memory bytes={{.MemTotal}}'
+          test "$(docker info --format '{{.NCPU}}')" -ge 4
+          docker run --rm --pull=always python:3.12-slim python --version
+
+      - name: Fetch unmodified public sources at exact commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q terminal-bench-source
+          git -C terminal-bench-source remote add origin https://github.com/harbor-framework/terminal-bench.git
+          git -C terminal-bench-source sparse-checkout init --no-cone
+          printf '/tasks/interleaved-vigenere/\n/tasks/session-window-debug/\n' > terminal-bench-source/.git/info/sparse-checkout
+          git -C terminal-bench-source fetch --quiet --depth=1 --filter=blob:none origin "$TB_PIN"
+          git -C terminal-bench-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C terminal-bench-source rev-parse HEAD)" = "$TB_PIN"
+          git init -q harbor-source
+          git -C harbor-source remote add origin https://github.com/harbor-framework/harbor.git
+          git -C harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$HARBOR_PIN"
+          git -C harbor-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C harbor-source rev-parse HEAD)" = "$HARBOR_PIN"
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+          base = Path("terminal-bench-source/tasks")
+          for slug, cpus in (("interleaved-vigenere", 4), ("session-window-debug", 2)):
+              p = base / slug
+              t = tomllib.loads((p / "task.toml").read_text())
+              assert t["task"]["name"] == "terminal-bench/" + slug
+              assert t["environment"]["cpus"] == cpus
+              assert t["verifier"]["environment_mode"] == "separate"
+              for f in ("instruction.md", "environment/Dockerfile", "tests/Dockerfile", "tests/test.sh", "solution/solve.sh"):
+                  assert (p / f).is_file()
+              print("PREREG_SOURCE_VALID", slug)
+          assert tomllib.loads(Path("harbor-source/pyproject.toml").read_text())["project"]["version"] == "0.24.0"
+          print("HARBOR_SOURCE_PIN_VALID")
+          PY
+
+      - name: Install exact pinned official Harbor, no model credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --no-input --quiet ./harbor-source
+          .venv/bin/harbor --version
+          mkdir -p native-output
+
+      - name: Native Oracle - interleaved-vigenere
+        id: iv_oracle
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
+            --path ./terminal-bench-source/tasks/interleaved-vigenere \
+            --agent oracle --env docker --n-attempts 1 --max-retries 0 \
+            --n-concurrent 1 --job-name tb4-iv-oracle --jobs-dir ./native-output
+          python3 scripts/inspect_native_result.py native-output/tb4-iv-oracle oracle 1
+
+      - name: Native nop - interleaved-vigenere
+        id: iv_nop
+        if: steps.iv_oracle.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
+            --path ./terminal-bench-source/tasks/interleaved-vigenere \
+            --agent nop --env docker --n-attempts 1 --max-retries 0 \
+            --n-concurrent 1 --job-name tb4-iv-nop --jobs-dir ./native-output
+          python3 scripts/inspect_native_result.py native-output/tb4-iv-nop nop 0
+
+      - name: Native Oracle - session-window-debug
+        id: sw_oracle
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
+            --path ./terminal-bench-source/tasks/session-window-debug \
+            --agent oracle --env docker --n-attempts 1 --max-retries 0 \
+            --n-concurrent 1 --job-name tb4-sw-oracle --jobs-dir ./native-output
+          python3 scripts/inspect_native_result.py native-output/tb4-sw-oracle oracle 1
+
+      - name: Native nop - session-window-debug
+        id: sw_nop
+        if: steps.sw_oracle.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
+            --path ./terminal-bench-source/tasks/session-window-debug \
+            --agent nop --env docker --n-attempts 1 --max-retries 0 \
+            --n-concurrent 1 --job-name tb4-sw-nop --jobs-dir ./native-output
+          python3 scripts/inspect_native_result.py native-output/tb4-sw-nop nop 0
+
+      - name: Final diagnostic receipt - no promotion and no replay
+        if: always()
+        shell: bash
+        env:
+          IV_ORACLE: ${{ steps.iv_oracle.outcome }}
+          IV_NOP: ${{ steps.iv_nop.outcome }}
+          SW_ORACLE: ${{ steps.sw_oracle.outcome }}
+          SW_NOP: ${{ steps.sw_nop.outcome }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Pinned public native diagnostic (not model comparison)'
+            echo 'Public upstream only; original separate verifier; no model calls.'
+            echo '| Arm | Workflow outcome |'
+            echo '|---|---|'
+            echo "| IV Oracle | $IV_ORACLE |"
+            echo "| IV nop | $IV_NOP |"
+            echo "| SW Oracle | $SW_ORACLE |"
+            echo "| SW nop | $SW_NOP |"
+            echo 'Environment or verifier error does not imply task/model failure.'
+            echo 'No scientific promotion; no rerun absent new owner authorization.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$IV_ORACLE" = "success"
+          test "$IV_NOP" = "success"
+          test "$SW_ORACLE" = "success"
+          test "$SW_NOP" = "success"
