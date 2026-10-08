@@ -47,7 +47,7 @@ def enforce_no_network(task, expected_task_name):
     ):
         raise RuntimeError("INSPECT_FROZEN_SAMPLE_IDENTITY_MISMATCH")
     spec = getattr(sample, "sandbox", None)
-    if getattr(spec, "name", None) != "docker":
+    if getattr(spec, "type", None) != "docker":
         raise RuntimeError("INSPECT_SANDBOX_NOT_DOCKER")
     cfg = getattr(spec, "config", None)
     services = getattr(cfg, "services", None)
