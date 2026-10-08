@@ -7,7 +7,22 @@ Ambiguous or invalid evidence fails closed; no model/provider calls.
 import argparse
 import json
 import math
+import tomllib
 from pathlib import Path
+
+def expected_verifier_mode(task_toml: Path) -> str:
+    """Bind verifier mode to pinned task source, default shared per Harbor."""
+    try:
+        source = tomllib.loads(task_toml.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("CHECKER_SOURCE_TOML_INVALID") from exc
+    verifier = source.get("verifier")
+    if not isinstance(verifier, dict):
+        raise ValueError("CHECKER_VERIFIER_CONFIG_MISSING")
+    mode = verifier.get("environment_mode", "shared")
+    if mode not in ("shared", "separate"):
+        raise ValueError("CHECKER_UNSUPPORTED_SOURCE_MODE")
+    return mode
 
 def inspect(job_dir: Path, agent: str, expected_reward: int, expected_mode: str) -> dict:
     if agent not in ("oracle", "nop") or expected_reward not in (0, 1):
@@ -51,9 +66,9 @@ def main():
     parser.add_argument("job_dir", type=Path)
     parser.add_argument("agent", choices=["oracle", "nop"])
     parser.add_argument("expected_reward", type=int, choices=[0, 1])
-    parser.add_argument("expected_mode", choices=["shared", "separate"])
+    parser.add_argument("task_toml", type=Path, help="pinned official task.toml")
     args = parser.parse_args()
-    result = inspect(args.job_dir, args.agent, args.expected_reward, args.expected_mode)
+    result = inspect(args.job_dir, args.agent, args.expected_reward, expected_verifier_mode(args.task_toml))
     print(json.dumps(result, sort_keys=True))
     print("CHECKER_CONTRACT_PASS_NONSCIENTIFIC", flush=True)
 
