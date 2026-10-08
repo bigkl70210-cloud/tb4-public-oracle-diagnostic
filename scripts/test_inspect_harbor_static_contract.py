@@ -131,6 +131,19 @@ class InspectStaticContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exactly one sample"):
             inspect_score(x, NAME)
 
+    def test_20_inspect_eval_explicitly_disables_model(self):
+        calls = [
+            n for n in ast.walk(TREE)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "inspect_eval"
+        ]
+        self.assertEqual(len(calls), 1)
+        args = [kw.value for kw in calls[0].keywords if kw.arg == "model"]
+        self.assertEqual(len(args), 1)
+        self.assertIsInstance(args[0], ast.Constant)
+        self.assertIsNone(args[0].value)
+
 
 if __name__ == "__main__":
     unittest.main()
