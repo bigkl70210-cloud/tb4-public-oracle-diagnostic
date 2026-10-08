@@ -16,12 +16,23 @@ def expected_verifier_mode(task_toml: Path) -> str:
         source = tomllib.loads(task_toml.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError("CHECKER_SOURCE_TOML_INVALID") from exc
+    task = source.get("task")
+    task_name = task.get("name") if isinstance(task, dict) else None
+    allowed = {
+        "harbor/hello-alpine": "shared",
+        "terminal-bench/interleaved-vigenere": "separate",
+        "terminal-bench/session-window-debug": "separate",
+    }
+    if task_name not in allowed:
+        raise ValueError("CHECKER_UNKNOWN_FROZEN_TASK")
     verifier = source.get("verifier")
     if not isinstance(verifier, dict):
         raise ValueError("CHECKER_VERIFIER_CONFIG_MISSING")
     mode = verifier.get("environment_mode", "shared")
     if mode not in ("shared", "separate"):
         raise ValueError("CHECKER_UNSUPPORTED_SOURCE_MODE")
+    if mode != allowed[task_name]:
+        raise ValueError("CHECKER_FROZEN_TASK_MODE_CONFLICT")
     return mode
 
 def inspect(job_dir: Path, agent: str, expected_reward: int, expected_mode: str) -> dict:
@@ -51,7 +62,7 @@ def inspect(job_dir: Path, agent: str, expected_reward: int, expected_mode: str)
         raise ValueError("CHECKER_TRIAL_EXCEPTION")
     verifier = result.get("verifier_result")
     rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
-    if not isinstance(rewards, dict) or len(rewards) != 1:
+    if not isinstance(rewards, dict) or set(rewards) != {"reward"}:
         raise ValueError("CHECKER_REWARD_ABSENT_OR_AMBIGUOUS")
     reward = next(iter(rewards.values()))
     if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
