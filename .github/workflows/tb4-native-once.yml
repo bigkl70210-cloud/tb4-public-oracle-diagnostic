@@ -1,4 +1,4 @@
-name: TB4 official pinned native one-shot
+name: TB4 pinned public Inspect-Harbor bounded one-shot
 
 on:
   push:
@@ -10,37 +10,46 @@ permissions:
   contents: read
 
 concurrency:
-  group: tb4-public-native-one-shot
+  group: tb4-public-inspect-owner-one-shot
   cancel-in-progress: false
 
 jobs:
-  native-diagnostic:
+  inspect-bounded:
+    # Previous workflow run #1 is committed NONREPLAY.
+    # Only this newly approved #2 may execute this diagnostic job.
+    if: github.run_number == 2
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 90
     env:
       TB_PIN: 452bf305c6daa62fc59061d22133a7cbc7c1572e
       HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
+      INSPECT_PIN: 18230ae283a8d43f57523764ee2f744010f5f8ae
+      INSPECT_HARBOR_NO_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
-      - name: Check out only public diagnostic code
+      - name: Read-only checkout of public diagnostic repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      - name: Validate standard Linux runner and native Docker engine
+      - name: Bound host prerequisites and public-only credential guard
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = "push"
           test "$RUNNER_OS" = "Linux"
-          echo "CPU count: $(nproc)"
-          free -h
-          df -h .
-          docker info --format 'Docker CPUs={{.NCPU}} memory bytes={{.MemTotal}}'
+          test "$GITHUB_EVENT_NAME" = "push"
+          test "$GITHUB_RUN_NUMBER" = "2"
           test "$(docker info --format '{{.NCPU}}')" -ge 4
-          docker run --rm --pull=always python:3.12-slim python --version
+          test -z "${OPENAI_API_KEY:-}"
+          test -z "${ANTHROPIC_API_KEY:-}"
+          test -z "${GOOGLE_API_KEY:-}"
+          test -z "${GEMINI_API_KEY:-}"
+          docker info --format 'DOCKER_CPUS={{.NCPU}} MEM={{.MemTotal}}'
+          echo "PUBLIC_ONLY_NO_MODEL_KEYS_CONFIRMED"
 
-      - name: Fetch unmodified public sources at exact commits
+      - name: Fetch frozen public Terminal-Bench, Harbor, and Inspect-Harbor source
         shell: bash
         run: |
           set -euo pipefail
@@ -56,105 +65,76 @@ jobs:
           git -C harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$HARBOR_PIN"
           git -C harbor-source checkout --quiet --detach FETCH_HEAD
           test "$(git -C harbor-source rev-parse HEAD)" = "$HARBOR_PIN"
+          git init -q inspect-harbor-source
+          git -C inspect-harbor-source remote add origin https://github.com/meridianlabs-ai/inspect_harbor.git
+          git -C inspect-harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$INSPECT_PIN"
+          git -C inspect-harbor-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C inspect-harbor-source rev-parse HEAD)" = "$INSPECT_PIN"
           python3 - <<'PY'
           from pathlib import Path
           import tomllib
-          base = Path("terminal-bench-source/tasks")
           for slug, cpus in (("interleaved-vigenere", 4), ("session-window-debug", 2)):
-              p = base / slug
-              t = tomllib.loads((p / "task.toml").read_text())
-              assert t["task"]["name"] == "terminal-bench/" + slug
-              assert t["environment"]["cpus"] == cpus
-              assert t["verifier"]["environment_mode"] == "separate"
-              for f in ("instruction.md", "environment/Dockerfile", "tests/Dockerfile", "tests/test.sh", "solution/solve.sh"):
+              p = Path("terminal-bench-source/tasks") / slug
+              spec = tomllib.loads((p / "task.toml").read_text())
+              assert spec["task"]["name"] == "terminal-bench/" + slug
+              assert spec["environment"]["cpus"] == cpus
+              assert spec["verifier"]["environment_mode"] == "separate"
+              for f in ("instruction.md", "environment/Dockerfile", "tests/test.sh", "solution/solve.sh"):
                   assert (p / f).is_file()
-              print("PREREG_SOURCE_VALID", slug)
+              print("IMMUTABLE_TB4_INPUT_OK", slug)
+          hello = Path("harbor-source/examples/tasks/hello-alpine/task.toml")
+          assert tomllib.loads(hello.read_text())["task"]["name"] == "harbor/hello-alpine"
           assert tomllib.loads(Path("harbor-source/pyproject.toml").read_text())["project"]["version"] == "0.24.0"
-          print("HARBOR_SOURCE_PIN_VALID")
+          assert (Path("inspect-harbor-source") / "src/inspect_harbor/_harbor/solver.py").is_file()
+          print("FROZEN_PUBLIC_SOURCES_OK")
           PY
 
-      - name: Install exact pinned official Harbor, no model credentials
+      - name: Install pinned public Harbor and Inspect-Harbor sources
         shell: bash
         run: |
           set -euo pipefail
           python3 -m venv .venv
           .venv/bin/python -m pip install --no-input --quiet ./harbor-source
+          .venv/bin/python -m pip install --no-input --quiet ./inspect-harbor-source
           .venv/bin/harbor --version
-          mkdir -p native-output
+          .venv/bin/python -c 'import inspect_ai, inspect_harbor; print("INSPECT_HARBOR_IMPORTED")'
+          .venv/bin/python -m pip freeze | grep -E '^(inspect|harbor|pydantic|docker)' || true
+          mkdir -p hello-output inspect-logs
 
-      - name: Native Oracle - interleaved-vigenere
-        id: iv_oracle
-        continue-on-error: true
+      - name: Official pinned Harbor hello-alpine Oracle native smoke
+        id: hello
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
-            --path ./terminal-bench-source/tasks/interleaved-vigenere \
+          timeout --signal=TERM --kill-after=10s 720s .venv/bin/harbor run \
+            --path ./harbor-source/examples/tasks/hello-alpine \
             --agent oracle --env docker --n-attempts 1 --max-retries 0 \
-            --n-concurrent 1 --job-name tb4-iv-oracle --jobs-dir ./native-output
-          python3 scripts/inspect_native_result.py native-output/tb4-iv-oracle oracle 1
+            --n-concurrent 1 --job-name tb4-hello-alpine --jobs-dir ./hello-output
+          python3 scripts/inspect_native_result.py hello-output/tb4-hello-alpine oracle 1
 
-      - name: Native nop - interleaved-vigenere
-        id: iv_nop
-        if: steps.iv_oracle.outcome == 'success'
-        continue-on-error: true
+      - name: One bounded Inspect-Harbor pass on fixed TB4 Oracle and nop arms
+        id: inspect
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
-            --path ./terminal-bench-source/tasks/interleaved-vigenere \
-            --agent nop --env docker --n-attempts 1 --max-retries 0 \
-            --n-concurrent 1 --job-name tb4-iv-nop --jobs-dir ./native-output
-          python3 scripts/inspect_native_result.py native-output/tb4-iv-nop nop 0
+          timeout --signal=TERM --kill-after=10s 4200s .venv/bin/python scripts/inspect_harbor_bounded.py
+          cat inspect-results.json
 
-      - name: Native Oracle - session-window-debug
-        id: sw_oracle
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
-            --path ./terminal-bench-source/tasks/session-window-debug \
-            --agent oracle --env docker --n-attempts 1 --max-retries 0 \
-            --n-concurrent 1 --job-name tb4-sw-oracle --jobs-dir ./native-output
-          python3 scripts/inspect_native_result.py native-output/tb4-sw-oracle oracle 1
-
-      - name: Native nop - session-window-debug
-        id: sw_nop
-        if: steps.sw_oracle.outcome == 'success'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 900s .venv/bin/harbor run \
-            --path ./terminal-bench-source/tasks/session-window-debug \
-            --agent nop --env docker --n-attempts 1 --max-retries 0 \
-            --n-concurrent 1 --job-name tb4-sw-nop --jobs-dir ./native-output
-          python3 scripts/inspect_native_result.py native-output/tb4-sw-nop nop 0
-
-      - name: Final diagnostic receipt - no promotion and no replay
+      - name: Close one-shot diagnostic with evidence ceiling
         if: always()
         shell: bash
         env:
-          IV_ORACLE: ${{ steps.iv_oracle.outcome }}
-          IV_NOP: ${{ steps.iv_nop.outcome }}
-          SW_ORACLE: ${{ steps.sw_oracle.outcome }}
-          SW_NOP: ${{ steps.sw_nop.outcome }}
+          HELLO: ${{ steps.hello.outcome }}
+          INSPECT: ${{ steps.inspect.outcome }}
         run: |
-          set -euo pipefail
           {
-            echo '## Pinned public native diagnostic (not model comparison)'
-            echo 'Public upstream only; original separate verifier; no model calls.'
-            echo '| Arm | Workflow outcome |'
-            echo '|---|---|'
-            echo "| IV Oracle | $IV_ORACLE |"
-            echo "| IV nop | $IV_NOP |"
-            echo "| SW Oracle | $SW_ORACLE |"
-            echo "| SW nop | $SW_NOP |"
-            echo 'Environment or verifier error does not imply task/model failure.'
-            echo 'No scientific promotion; no rerun absent new owner authorization.'
+            echo '## Owner authorized new TB4 one-shot diagnostic #2'
+            echo 'Previous native result run 37814221257 remains COMMITTED NONREPLAY.'
+            echo "| Upstream hello-alpine | $HELLO |"
+            echo "| Inspect-Harbor four fixed Oracle/nop observations | $INSPECT |"
+            echo 'No provider/model execution; task and scorer source pinned/unchanged.'
+            echo 'Inspect-Harbor does not establish native Harbor separate-verifier isolation parity.'
+            echo 'No subsystem swap, scientific performance claim, automatic retry, or further run authority.'
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$IV_ORACLE" = "success"
-          test "$IV_NOP" = "success"
-          test "$SW_ORACLE" = "success"
-          test "$SW_NOP" = "success"
+          test "$HELLO" = "success"
+          test "$INSPECT" = "success"
