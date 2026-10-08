@@ -102,6 +102,7 @@ def main():
             logs = inspect_eval(
                 task,
                 solver=solver_fn(),
+                model=None,  # never inherit INSPECT_EVAL_MODEL from the runner
                 log_dir=str(Path("inspect-logs") / slug / name),
                 max_samples=1,
             )
