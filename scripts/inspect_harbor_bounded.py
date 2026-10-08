@@ -7,6 +7,7 @@ Inspect's verification sandbox differs from native Harbor separate mode;
 observed score equality is NOT full verifier-isolation parity.
 """
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -60,8 +61,8 @@ def inspect_score(log):
     if "harbor" not in key.lower():
         raise RuntimeError(f"Unexpected scorer identity: {key}")
     value = score.value
-    if not isinstance(value, (int, float)):
-        raise RuntimeError(f"Non-numeric Inspect reward: {value}")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise RuntimeError(f"Non-finite or non-numeric Inspect reward: {value}")
     return float(value)
 
 def main():
