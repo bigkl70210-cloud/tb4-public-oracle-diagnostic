@@ -67,13 +67,32 @@ class ModeAwareCheckerTests(unittest.TestCase):
         self.write(trial(), "two/result.json")
         (self.folder / "two/result.json").write_text("{broken")
         self.fails("CORRUPT_RESULT_JSON")
+    def test_21_nonreward_key_rejected(self):
+        self.write({**trial(), "verifier_result": {"rewards": {"other_key": 1}}})
+        self.fails("ABSENT_OR_AMBIGUOUS")
+    def test_22_unknown_frozen_task_rejected(self):
+        p = self.folder / "unknown.toml"
+        p.write_text('[task]\nname = "unknown/task"\n[verifier]\n')
+        with self.assertRaisesRegex(ValueError, "CHECKER_UNKNOWN_FROZEN_TASK"):
+            expected_verifier_mode(p)
+    def test_23_wrong_mode_for_known_task_rejected(self):
+        p = self.folder / "mode.toml"
+        p.write_text('[task]\nname = "harbor/hello-alpine"\n[verifier]\nenvironment_mode = "separate"\n')
+        with self.assertRaisesRegex(ValueError, "CHECKER_FROZEN_TASK_MODE_CONFLICT"):
+            expected_verifier_mode(p)
+    def test_24_missing_source_identity_rejected(self):
+        p = self.folder / "missing.toml"
+        p.write_text('[verifier]\n')
+        with self.assertRaisesRegex(ValueError, "CHECKER_UNKNOWN_FROZEN_TASK"):
+            expected_verifier_mode(p)
+
     def test_17_task_source_default_shared(self):
         p = self.folder / "hello.toml"
         p.write_text('[task]\nname = "harbor/hello-alpine"\n[verifier]\ntimeout_sec = 120\n')
         self.assertEqual(expected_verifier_mode(p), "shared")
     def test_18_task_source_explicit_separate(self):
         p = self.folder / "tb4.toml"
-        p.write_text('[verifier]\nenvironment_mode = "separate"\n')
+        p.write_text('[task]\nname = "terminal-bench/interleaved-vigenere"\n[verifier]\nenvironment_mode = "separate"\n')
         self.assertEqual(expected_verifier_mode(p), "separate")
     def test_19_invalid_source_toml_fails(self):
         p = self.folder / "bad.toml"
@@ -82,7 +101,7 @@ class ModeAwareCheckerTests(unittest.TestCase):
             expected_verifier_mode(p)
     def test_20_unsupported_source_mode_fails(self):
         p = self.folder / "bad_mode.toml"
-        p.write_text('[verifier]\nenvironment_mode = "nonsense"\n')
+        p.write_text('[task]\nname = "harbor/hello-alpine"\n[verifier]\nenvironment_mode = "nonsense"\n')
         with self.assertRaisesRegex(ValueError, "CHECKER_UNSUPPORTED_SOURCE_MODE"):
             expected_verifier_mode(p)
 
