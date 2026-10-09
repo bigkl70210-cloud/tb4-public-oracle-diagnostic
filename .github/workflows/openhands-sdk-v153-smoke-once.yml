@@ -1,0 +1,183 @@
+# Owner approval: 2026-10-10, one ephemeral public GitHub Actions execution.
+# No model/provider API, secrets, private data, operational replacement or runner writes.
+name: OpenHands v1.53.0 SDK offline smoke one-shot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/openhands-sdk-v153-smoke-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openhands-v153-sdk-install-smoke-one-shot
+  cancel-in-progress: false
+
+jobs:
+  native-smoke:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GIT_TERMINAL_PROMPT: '0'
+      GIT_LFS_SKIP_SMUDGE: '1'
+      DO_NOT_TRACK: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      OTEL_SDK_DISABLED: 'true'
+      OPENHANDS_SUPPRESS_BANNER: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      UV_NO_PROGRESS: '1'
+    steps:
+      - name: Install uv/Python from upstream-pinned official action
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Reacquire exact official SDK source (no repo checkout or secrets)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_RUN_NUMBER" = 1
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/main
+          test -z "${OPENAI_API_KEY:-}"
+          test -z "${ANTHROPIC_API_KEY:-}"
+          test -z "${GEMINI_API_KEY:-}"
+          test -z "${LLM_API_KEY:-}"
+          git -c core.hooksPath=/dev/null clone --quiet --depth 1 --branch v1.53.0 --single-branch https://github.com/OpenHands/software-agent-sdk.git official-source
+          test "$(git -C official-source rev-parse HEAD)" = 54daf056bd863bb46f922a2fe9324dd736b37ff6
+          test -f official-source/uv.lock
+          test -f official-source/openhands-sdk/pyproject.toml
+          test -f official-source/openhands-sdk/openhands/sdk/conversation/event_store.py
+          test -f official-source/openhands-sdk/openhands/sdk/io/memory.py
+          echo 'PINNED_OFFICIAL_SOURCE_PASS'
+
+      - name: Install official SDK using native frozen dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd official-source
+          uv sync --frozen --no-dev --package openhands-sdk --python 3.13
+          uv pip show --python .venv/bin/python openhands-sdk | grep -F 'Version: 1.53.0'
+          test "$(git rev-parse HEAD)" = 54daf056bd863bb46f922a2fe9324dd736b37ff6
+          echo 'FROZEN_NATIVE_SDK_INSTALL_PASS'
+
+      - name: Native SDK no-model filesystem and event-log smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd official-source
+          .venv/bin/python - <<'PY'
+          import json
+          import os
+          import socket
+          import sys
+          import tempfile
+          from importlib.metadata import version
+          from pathlib import Path
+
+          # Deny outbound network connections during native runtime smoke.
+          def no_network(*args, **kwargs):
+              raise RuntimeError('NETWORK_DISABLED_FOR_MODEL_FREE_SMOKE')
+          socket.socket.connect = no_network
+          socket.socket.connect_ex = no_network
+          socket.create_connection = no_network
+          for key in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'LLM_API_KEY'):
+              assert not os.environ.get(key), f'Unexpected provider variable: {key}'
+
+          import openhands.sdk
+          from openhands.sdk.conversation.event_store import EventLog
+          from openhands.sdk.event import Event
+          from openhands.sdk.event.llm_convertible.message import MessageEvent
+          from openhands.sdk.io import LocalFileStore, InMemoryFileStore
+          from openhands.sdk.llm import Message, TextContent
+
+          assert openhands.sdk.__version__ == '1.53.0'
+          assert version('openhands-sdk') == '1.53.0'
+          content = 'safe-offline-native-event-smoke'
+          event = MessageEvent(
+              source='user',
+              llm_message=Message(role='user', content=[TextContent(text=content)]),
+          )
+          parsed = Event.model_validate_json(event.model_dump_json())
+          assert parsed.id == event.id
+
+          memory = InMemoryFileStore()
+          log = EventLog(memory, dir_path='smoke-events')
+          assert log.append(event) == 0
+          assert len(log) == 1
+          reopened = EventLog(memory, dir_path='smoke-events')
+          assert len(reopened) == 1
+          assert reopened[0].id == event.id
+          assert reopened[0].llm_message.content[0].text == content
+
+          with tempfile.TemporaryDirectory() as tmp:
+              disk = LocalFileStore(tmp)
+              disk.write('test/receipt.txt', content)
+              assert disk.read('test/receipt.txt') == content
+              assert disk.exists('test/receipt.txt')
+              persisted = EventLog(disk, dir_path='native-events')
+              assert persisted.append(event) == 0
+              reopened_disk = EventLog(LocalFileStore(tmp), dir_path='native-events')
+              assert len(reopened_disk) == 1
+              assert reopened_disk[0].id == event.id
+              try:
+                  disk.get_full_path('../escape-test')
+              except ValueError:
+                  pass
+              else:
+                  raise AssertionError('LocalFileStore path traversal not blocked')
+
+          with socket.socket() as s:
+              try:
+                  s.connect(('127.0.0.1', 1))
+              except RuntimeError as e:
+                  assert str(e) == 'NETWORK_DISABLED_FOR_MODEL_FREE_SMOKE'
+              else:
+                  raise AssertionError('network guard was ineffective')
+          report = {
+              'status': 'PASS',
+              'claim_ceiling': 'installed_SDK_no_model_smoke_only',
+              'official_commit': '54daf056bd863bb46f922a2fe9324dd736b37ff6',
+              'version': version('openhands-sdk'),
+              'python': sys.version.split()[0],
+              'checks': [
+                  'installed_sdk_version', 'message_event_json_roundtrip',
+                  'memory_eventlog_append_reopen', 'local_file_store_persistence',
+                  'disk_eventlog_append_reopen', 'local_path_escape_rejected',
+                  'socket_network_guard', 'provider_environment_absent',
+              ],
+              'model_calls': 0,
+              'private_inputs': 0,
+              'operational_harness_swap': False,
+              'real_agent_run': False,
+          }
+          Path('../openhands-native-smoke-receipt.json').write_text(
+              json.dumps(report, sort_keys=True, indent=2) + '\n', encoding='utf-8'
+          )
+          print('OPENHANDS_NATIVE_SDK_NO_MODEL_SMOKE_PASS')
+          PY
+
+      - name: Make bounded receipt for any failure, never upload logs or credentials
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f openhands-native-smoke-receipt.json ]; then
+            printf '%s\n' '{"status":"INCOMPLETE_OR_FAILED","claim_ceiling":"no_native_smoke_pass_claim","model_calls":0,"operational_harness_swap":false}' > openhands-native-smoke-receipt.json
+          fi
+          sha256sum openhands-native-smoke-receipt.json > openhands-native-smoke-receipt.sha256
+
+      - name: Upload only minimal public smoke receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openhands-v153-sdk-no-model-smoke-receipt
+          path: |
+            openhands-native-smoke-receipt.json
+            openhands-native-smoke-receipt.sha256
+          retention-days: 1
+          if-no-files-found: error
