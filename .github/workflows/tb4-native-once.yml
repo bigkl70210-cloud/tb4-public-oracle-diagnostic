@@ -1,4 +1,4 @@
-name: TB4 pinned public Inspect-Harbor bounded one-shot
+name: TB4 public pinned Inspect-Harbor owner approved one-shot #3
 
 on:
   push:
@@ -15,11 +15,11 @@ concurrency:
 
 jobs:
   inspect-bounded:
-    # Previous workflow run #1 is committed NONREPLAY.
-    # Only this newly approved #2 may execute this diagnostic job.
-    if: github.run_number == 2
+    # Both prior runs #1 and #2 are COMMITTED/CLOSED NONREPLAY.
+    # Only this new run #3 on first attempt may execute.
+    if: github.run_number == 3 && github.run_attempt == 1
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       TB_PIN: 452bf305c6daa62fc59061d22133a7cbc7c1572e
       HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
@@ -28,6 +28,7 @@ jobs:
       DO_NOT_TRACK: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      INSPECT_EVAL_MODEL: ""
     steps:
       - name: Read-only checkout of public diagnostic repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -40,7 +41,9 @@ jobs:
           set -euo pipefail
           test "$RUNNER_OS" = "Linux"
           test "$GITHUB_EVENT_NAME" = "push"
-          test "$GITHUB_RUN_NUMBER" = "2"
+          test "$GITHUB_RUN_NUMBER" = "3"
+          test "$GITHUB_RUN_ATTEMPT" = "1"
+          test -z "${INSPECT_EVAL_MODEL:-}"
           test "$(docker info --format '{{.NCPU}}')" -ge 4
           test -z "${OPENAI_API_KEY:-}"
           test -z "${ANTHROPIC_API_KEY:-}"
@@ -48,6 +51,14 @@ jobs:
           test -z "${GEMINI_API_KEY:-}"
           docker info --format 'DOCKER_CPUS={{.NCPU}} MEM={{.MemTotal}}'
           echo "PUBLIC_ONLY_NO_MODEL_KEYS_CONFIRMED"
+
+      - name: Offline frozen checker and Inspect contract tests (44 expected)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q scripts
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          echo 'FROZEN_NATIVE_AND_INSPECT_OFFLINE_CONTRACTS_COMPLETE'
 
       - name: Fetch frozen public Terminal-Bench, Harbor, and Inspect-Harbor source
         shell: bash
@@ -101,40 +112,27 @@ jobs:
           .venv/bin/python -m pip freeze | grep -E '^(inspect|harbor|pydantic|docker)' || true
           mkdir -p hello-output inspect-logs
 
-      - name: Official pinned Harbor hello-alpine Oracle native smoke
-        id: hello
-        shell: bash
-        run: |
-          set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 720s .venv/bin/harbor run \
-            --path ./harbor-source/examples/tasks/hello-alpine \
-            --agent oracle --env docker --n-attempts 1 --max-retries 0 \
-            --n-concurrent 1 --job-name tb4-hello-alpine --jobs-dir ./hello-output
-          python3 scripts/inspect_native_result.py hello-output/tb4-hello-alpine oracle 1
-
       - name: One bounded Inspect-Harbor pass on fixed TB4 Oracle and nop arms
         id: inspect
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 4200s .venv/bin/python scripts/inspect_harbor_bounded.py
+          timeout --signal=TERM --kill-after=10s 2400s .venv/bin/python scripts/inspect_harbor_bounded.py
           cat inspect-results.json
 
       - name: Close one-shot diagnostic with evidence ceiling
         if: always()
         shell: bash
         env:
-          HELLO: ${{ steps.hello.outcome }}
           INSPECT: ${{ steps.inspect.outcome }}
         run: |
           {
-            echo '## Owner authorized new TB4 one-shot diagnostic #2'
-            echo 'Previous native result run 37814221257 remains COMMITTED NONREPLAY.'
-            echo "| Upstream hello-alpine | $HELLO |"
+            echo '## Owner authorized new TB4 Inspect-only one-shot #3'
+            echo 'Native TB4 result run 37814221257 and diagnostic run 37816598094 remain CLOSED NONREPLAY.'
+            echo "Native Harbor smoke is already evidenced; no redundant native replay."
             echo "| Inspect-Harbor four fixed Oracle/nop observations | $INSPECT |"
-            echo 'No provider/model execution; task and scorer source pinned/unchanged.'
+            echo 'No provider/model execution intended; frozen public task and scorer source.'
             echo 'Inspect-Harbor does not establish native Harbor separate-verifier isolation parity.'
-            echo 'No subsystem swap, scientific performance claim, automatic retry, or further run authority.'
+            echo 'No native separate verifier isolation parity, subsystem swap, scientific performance claim, automatic retry, or further run authority.'
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$HELLO" = "success"
           test "$INSPECT" = "success"
