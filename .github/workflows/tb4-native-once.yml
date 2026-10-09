@@ -1,4 +1,4 @@
-name: TB4 pinned Codex GPT-6.1 Sol one-shot #4
+name: TB4 pinned Codex GPT-6.1 Sol one-shot #5
 
 on:
   push:
@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: tb4-public-codex-20261009-one-shot
+  group: tb4-public-codex-20261009-one-shot-5
   cancel-in-progress: false
 
 jobs:
   codex-bounded:
-    if: github.run_number == 4 && github.run_attempt == 1 && github.ref == 'refs/heads/main'
+    if: github.run_number == 5 && github.run_attempt == 1 && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     environment: tb4-once
@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_EVENT_NAME" = push
-          test "$GITHUB_RUN_NUMBER" = 4
+          test "$GITHUB_RUN_NUMBER" = 5
           test "$GITHUB_RUN_ATTEMPT" = 1
           test "$GITHUB_REF" = refs/heads/main
           test "$MODEL" = gpt-6.1-sol
@@ -112,9 +112,9 @@ jobs:
             --agent codex --model "$MODEL" --env docker \
             --agent-kwarg version=0.161.0 \
             --agent-kwarg web_search=disabled \
-            --effort low --agent-timeout 720 \
+            --effort low --agent-timeout-multiplier 0.025 \
             --n-attempts 1 --max-retries 0 --n-concurrent 1 \
-            --job-name tb4-sol-one-shot-four --jobs-dir ./tb4-measurement \
+            --job-name tb4-sol-one-shot-five --jobs-dir ./tb4-measurement \
             > ./harbor-native.stdout 2> ./harbor-native.stderr
           result=$?
           set -e
@@ -150,8 +150,8 @@ jobs:
           print("TB4_MINIMAL_RECEIPT="+json.dumps(result,sort_keys=True))
           PY
           {
-            echo '## TB4 GPT-6.1 Sol pinned one-shot #4'
-            echo 'Old runs #1/#2/#3 CLOSED NONREPLAY; no replay.'
+            echo '## TB4 GPT-6.1 Sol pinned one-shot #5'
+            echo 'Old runs #1/#2/#3/#4 CLOSED NONREPLAY; no replay.'
             echo 'Official frozen session-window-debug, independent Harbor verifier.'
             echo 'One agent, one attempt, zero retries; max 720 seconds agent phase.'
             echo 'Meta Q1 key referenced only from tb4-once Environment; no artifact uploaded.'
