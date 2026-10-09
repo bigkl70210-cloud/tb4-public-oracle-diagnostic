@@ -112,7 +112,7 @@ jobs:
             --agent codex --model "$MODEL" --env docker \
             --agent-kwarg version=0.161.0 \
             --agent-kwarg web_search=disabled \
-            --effort low --agent-timeout 720 \
+            --effort low --agent-timeout-multiplier 0.025 \
             --n-attempts 1 --max-retries 0 --n-concurrent 1 \
             --job-name tb4-sol-one-shot-four --jobs-dir ./tb4-measurement \
             > ./harbor-native.stdout 2> ./harbor-native.stderr
