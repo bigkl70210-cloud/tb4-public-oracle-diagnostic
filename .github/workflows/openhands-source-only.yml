@@ -1,0 +1,63 @@
+# Owner-authorized 2026-10-10: official source acquisition ONLY.
+# No models, secrets, private checkout, installation, or operational swap.
+name: OpenHands v1.53.0 official source acquisition
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openhands-v1-53-0-source-only-once
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      GIT_LFS_SKIP_SMUDGE: "1"
+    steps:
+      - name: Fetch and verify pinned original source; never execute it
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_RUN_NUMBER" = 1
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/main
+          git -c core.hooksPath=/dev/null clone --depth 1 --no-checkout --single-branch --branch v1.53.0 https://github.com/OpenHands/software-agent-sdk.git official-source
+          test "$(git -C official-source rev-parse HEAD)" = 54daf056bd863bb46f922a2fe9324dd736b37ff6
+          git -C official-source -c core.hooksPath=/dev/null checkout --detach 54daf056bd863bb46f922a2fe9324dd736b37ff6
+          test -d official-source/openhands-sdk
+          test -d official-source/openhands-agent-server
+          test -d official-source/openhands-tools
+          test -d official-source/openhands-workspace
+          test -f official-source/uv.lock
+          test -f official-source/LICENSE
+          sha256sum official-source/uv.lock official-source/pyproject.toml > sha256-lock.txt
+          {
+            echo 'STATUS=SOURCE_ACQUIRED_PIN_VERIFIED'
+            echo 'UPSTREAM=https://github.com/OpenHands/software-agent-sdk'
+            echo 'TAG=v1.53.0'
+            echo 'COMMIT=54daf056bd863bb46f922a2fe9324dd736b37ff6'
+            echo 'MODEL_CALLS=0'
+            echo 'SDK_EXECUTION=NOT_RUN'
+            echo 'SECRETS_PASSED=NONE'
+            echo 'OPS_SWAP=NO'
+          } > receipt.txt
+          tar -czf openhands-sdk-v1.53.0-exact-source.tar.gz official-source
+          sha256sum openhands-sdk-v1.53.0-exact-source.tar.gz >> receipt.txt
+
+      - name: Upload pinned upstream source and verification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: official-openhands-sdk-v1_53_0-source
+          path: |
+            openhands-sdk-v1.53.0-exact-source.tar.gz
+            sha256-lock.txt
+            receipt.txt
+          retention-days: 1
+          if-no-files-found: error
