@@ -1,4 +1,4 @@
-name: TB4 public pinned Inspect-Harbor owner approved one-shot #3
+name: TB4 pinned Codex GPT-6.1 Sol one-shot #4
 
 on:
   push:
@@ -10,129 +10,151 @@ permissions:
   contents: read
 
 concurrency:
-  group: tb4-public-inspect-owner-one-shot
+  group: tb4-public-codex-20261009-one-shot
   cancel-in-progress: false
 
 jobs:
-  inspect-bounded:
-    # Both prior runs #1 and #2 are COMMITTED/CLOSED NONREPLAY.
-    # Only this new run #3 on first attempt may execute.
-    if: github.run_number == 3 && github.run_attempt == 1
+  codex-bounded:
+    if: github.run_number == 4 && github.run_attempt == 1 && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 40
+    environment: tb4-once
     env:
       TB_PIN: 452bf305c6daa62fc59061d22133a7cbc7c1572e
       HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
-      INSPECT_PIN: 18230ae283a8d43f57523764ee2f744010f5f8ae
-      INSPECT_HARBOR_NO_TELEMETRY: "1"
+      MODEL: gpt-6.1-sol
       DO_NOT_TRACK: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      INSPECT_EVAL_MODEL: ""
     steps:
-      - name: Read-only checkout of public diagnostic repository
+      - name: Checkout public diagnostics with no persistent Git credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      - name: Bound host prerequisites and public-only credential guard
+      - name: Fail-closed one-shot identity and Docker prerequisites
         shell: bash
         run: |
           set -euo pipefail
-          test "$RUNNER_OS" = "Linux"
-          test "$GITHUB_EVENT_NAME" = "push"
-          test "$GITHUB_RUN_NUMBER" = "3"
-          test "$GITHUB_RUN_ATTEMPT" = "1"
-          test -z "${INSPECT_EVAL_MODEL:-}"
-          test "$(docker info --format '{{.NCPU}}')" -ge 4
-          test -z "${OPENAI_API_KEY:-}"
-          test -z "${ANTHROPIC_API_KEY:-}"
-          test -z "${GOOGLE_API_KEY:-}"
-          test -z "${GEMINI_API_KEY:-}"
-          docker info --format 'DOCKER_CPUS={{.NCPU}} MEM={{.MemTotal}}'
-          echo "PUBLIC_ONLY_NO_MODEL_KEYS_CONFIRMED"
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_RUN_NUMBER" = 4
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/main
+          test "$MODEL" = gpt-6.1-sol
+          test "$(docker info --format '{{.NCPU}}')" -ge 2
+          test -z "$(printenv OPENAI_API_KEY || true)"
+          echo "ONE_SHOT_IDENTITY_AND_EMPTY_PROVIDER_ENV_PASS"
 
-      - name: Offline frozen checker and Inspect contract tests (44 expected)
+      - name: Acquire pinned official TB4 and Harbor sources
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m compileall -q scripts
-          python3 -m unittest discover -s scripts -p 'test_*.py' -v
-          echo 'FROZEN_NATIVE_AND_INSPECT_OFFLINE_CONTRACTS_COMPLETE'
-
-      - name: Fetch frozen public Terminal-Bench, Harbor, and Inspect-Harbor source
-        shell: bash
-        run: |
-          set -euo pipefail
-          git init -q terminal-bench-source
-          git -C terminal-bench-source remote add origin https://github.com/harbor-framework/terminal-bench.git
-          git -C terminal-bench-source sparse-checkout init --no-cone
-          printf '/tasks/interleaved-vigenere/\n/tasks/session-window-debug/\n' > terminal-bench-source/.git/info/sparse-checkout
-          git -C terminal-bench-source fetch --quiet --depth=1 --filter=blob:none origin "$TB_PIN"
-          git -C terminal-bench-source checkout --quiet --detach FETCH_HEAD
-          test "$(git -C terminal-bench-source rev-parse HEAD)" = "$TB_PIN"
+          git init -q tb-source
+          git -C tb-source remote add origin https://github.com/harbor-framework/terminal-bench.git
+          git -C tb-source sparse-checkout init --no-cone
+          printf '/tasks/session-window-debug/\n' > tb-source/.git/info/sparse-checkout
+          git -C tb-source fetch --quiet --depth=1 --filter=blob:none origin "$TB_PIN"
+          git -C tb-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C tb-source rev-parse HEAD)" = "$TB_PIN"
           git init -q harbor-source
           git -C harbor-source remote add origin https://github.com/harbor-framework/harbor.git
           git -C harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$HARBOR_PIN"
           git -C harbor-source checkout --quiet --detach FETCH_HEAD
           test "$(git -C harbor-source rev-parse HEAD)" = "$HARBOR_PIN"
-          git init -q inspect-harbor-source
-          git -C inspect-harbor-source remote add origin https://github.com/meridianlabs-ai/inspect_harbor.git
-          git -C inspect-harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$INSPECT_PIN"
-          git -C inspect-harbor-source checkout --quiet --detach FETCH_HEAD
-          test "$(git -C inspect-harbor-source rev-parse HEAD)" = "$INSPECT_PIN"
           python3 - <<'PY'
           from pathlib import Path
           import tomllib
-          for slug, cpus in (("interleaved-vigenere", 4), ("session-window-debug", 2)):
-              p = Path("terminal-bench-source/tasks") / slug
-              spec = tomllib.loads((p / "task.toml").read_text())
-              assert spec["task"]["name"] == "terminal-bench/" + slug
-              assert spec["environment"]["cpus"] == cpus
-              assert spec["verifier"]["environment_mode"] == "separate"
-              for f in ("instruction.md", "environment/Dockerfile", "tests/test.sh", "solution/solve.sh"):
-                  assert (p / f).is_file()
-              print("IMMUTABLE_TB4_INPUT_OK", slug)
-          hello = Path("harbor-source/examples/tasks/hello-alpine/task.toml")
-          assert tomllib.loads(hello.read_text())["task"]["name"] == "harbor/hello-alpine"
-          assert tomllib.loads(Path("harbor-source/pyproject.toml").read_text())["project"]["version"] == "0.24.0"
-          assert (Path("inspect-harbor-source") / "src/inspect_harbor/_harbor/solver.py").is_file()
-          print("FROZEN_PUBLIC_SOURCES_OK")
+          source=Path("tb-source/tasks/session-window-debug")
+          t=tomllib.loads((source/"task.toml").read_text())
+          assert t["task"]["name"]=="terminal-bench/session-window-debug"
+          assert t["verifier"]["environment_mode"]=="separate"
+          assert (source/"tests/test.sh").is_file()
+          assert tomllib.loads(Path("harbor-source/pyproject.toml").read_text())["project"]["version"]=="0.24.0"
+          print("OFFICIAL_SOURCE_PINS_PASS")
           PY
 
-      - name: Install pinned public Harbor and Inspect-Harbor sources
+      - name: Prepare Harbor and agent-only provider network allowance
         shell: bash
         run: |
           set -euo pipefail
           python3 -m venv .venv
           .venv/bin/python -m pip install --no-input --quiet ./harbor-source
-          .venv/bin/python -m pip install --no-input --quiet ./inspect-harbor-source
           .venv/bin/harbor --version
-          .venv/bin/python -c 'import inspect_ai, inspect_harbor; print("INSPECT_HARBOR_IMPORTED")'
-          .venv/bin/python -m pip freeze | grep -E '^(inspect|harbor|pydantic|docker)' || true
-          mkdir -p hello-output inspect-logs
+          cp -a tb-source/tasks/session-window-debug isolated-task
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+          p=Path("isolated-task/task.toml")
+          src=p.read_text()
+          assert src.count("[agent]\n")==1
+          src=src.replace("[agent]\n","[agent]\nnetwork_mode = 'allowlist'\nallowed_hosts = ['api.openai.com']\n",1)
+          cfg=tomllib.loads(src)
+          assert cfg["agent"]["network_mode"]=="allowlist"
+          assert cfg["agent"]["allowed_hosts"]==["api.openai.com"]
+          p.write_text(src)
+          print("SOURCE_FROZEN_NETWORK_ISOLATION_APPLIED")
+          PY
 
-      - name: One bounded Inspect-Harbor pass on fixed TB4 Oracle and nop arms
-        id: inspect
+      - name: One model run through official Harbor and Codex only
+        id: measured
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.TB4_META_Q1_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$OPENAI_API_KEY"
+          case "$OPENAI_API_KEY" in sk-*) ;; *) exit 3;; esac
+          echo "::add-mask::$OPENAI_API_KEY"
+          mkdir -p tb4-measurement
+          set +e
+          timeout --signal=TERM --kill-after=15s 1200s .venv/bin/harbor run \
+            --path ./isolated-task \
+            --agent codex --model "$MODEL" --env docker \
+            --agent-kwarg version=0.161.0 \
+            --agent-kwarg web_search=disabled \
+            --effort low --agent-timeout 720 \
+            --n-attempts 1 --max-retries 0 --n-concurrent 1 \
+            --job-name tb4-sol-one-shot-four --jobs-dir ./tb4-measurement \
+            > ./harbor-native.stdout 2> ./harbor-native.stderr
+          result=$?
+          set -e
+          echo "HARBOR_PROCESS_EXIT=$result"
+          exit "$result"
+
+      - name: Minimal scorer-owned result receipt, no transcript upload
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 2400s .venv/bin/python scripts/inspect_harbor_bounded.py
-          cat inspect-results.json
-
-      - name: Close one-shot diagnostic with evidence ceiling
-        if: always()
-        shell: bash
-        env:
-          INSPECT: ${{ steps.inspect.outcome }}
-        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          paths=list(Path("tb4-measurement").rglob("result.json"))
+          rows=[]
+          for p in paths:
+              try:d=json.loads(p.read_text())
+              except (OSError,ValueError):continue
+              if isinstance(d,dict) and d.get("trial_name"):rows.append(d)
+          assert len(rows)<=1,"AMBIGUOUS_TRIAL_RESULT"
+          d=rows[0] if rows else {}
+          vr=d.get("verifier_result") or {}
+          rewards=vr.get("rewards") if isinstance(vr,dict) else None
+          er=d.get("exception_info")
+          agent=d.get("agent_info") or {}
+          result={"native_result_found":bool(rows),"agent":agent.get("name"),
+                  "verifier_mode":d.get("verifier_environment_mode"),
+                  "reward":rewards if isinstance(rewards,dict) else None,
+                  "exception_type":er.get("exception_type") if isinstance(er,dict) else None,
+                  "model":"gpt-6.1-sol",
+                  "claim_ceiling":"single-task-bounded-not-model-promotion"}
+          print("TB4_MINIMAL_RECEIPT="+json.dumps(result,sort_keys=True))
+          PY
           {
-            echo '## Owner authorized new TB4 Inspect-only one-shot #3'
-            echo 'Native TB4 result run 37814221257 and diagnostic run 37816598094 remain CLOSED NONREPLAY.'
-            echo "Native Harbor smoke is already evidenced; no redundant native replay."
-            echo "| Inspect-Harbor four fixed Oracle/nop observations | $INSPECT |"
-            echo 'No provider/model execution intended; frozen public task and scorer source.'
-            echo 'Inspect-Harbor does not establish native Harbor separate-verifier isolation parity.'
-            echo 'No native separate verifier isolation parity, subsystem swap, scientific performance claim, automatic retry, or further run authority.'
+            echo '## TB4 GPT-6.1 Sol pinned one-shot #4'
+            echo 'Old runs #1/#2/#3 CLOSED NONREPLAY; no replay.'
+            echo 'Official frozen session-window-debug, independent Harbor verifier.'
+            echo 'One agent, one attempt, zero retries; max 720 seconds agent phase.'
+            echo 'Meta Q1 key referenced only from tb4-once Environment; no artifact uploaded.'
+            echo 'API billing limit is operational, not a guaranteed provider hard cap; check Platform usage.'
+            echo 'One task cannot prove model promotion or scientific parity.'
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$INSPECT" = "success"
