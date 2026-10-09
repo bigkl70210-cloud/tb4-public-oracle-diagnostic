@@ -114,6 +114,23 @@ def main():
             print(f"INSPECT_NATIVE_REWARD_COMPARE {slug} {name}: "
                   f"inspect={result} prereg_native={expected}", flush=True)
             if result != expected:
+                # Emit only a safe diagnostic category, not arbitrary verifier
+                # stdout/stderr that might contain unintended environment data.
+                score = logs[0].samples[0].scores["harbor_scorer"]
+                explanation = getattr(score, "explanation", "")
+                detail = explanation.lower() if isinstance(explanation, str) else ""
+                if any(x in detail for x in (
+                    "pytest: command not found", "pytest: not found",
+                    "no module named pytest",
+                )):
+                    category = "PYTEST_ABSENT_IN_INSPECT_SANDBOX"
+                elif "unrecognized arguments: --ctrf" in detail:
+                    category = "PYTEST_CTRF_OPTION_UNAVAILABLE"
+                elif "module not found" in detail or "modulenotfounderror" in detail:
+                    category = "VERIFIER_DEPENDENCY_MISSING_UNCLASSIFIED"
+                else:
+                    category = "UNCLASSIFIED_REQUIRES_RETAINED_EVAL_LOG"
+                print(f"INSPECT_MISMATCH_VERIFIER_SIGNATURE={category}", flush=True)
                 raise RuntimeError(f"BOUNDED_SCORE_CONTRAST_FAILED {slug}/{name}")
     Path("inspect-results.json").write_text(
         json.dumps({"inspect_harbor_pin": "18230ae283a8d43f57523764ee2f744010f5f8ae",
