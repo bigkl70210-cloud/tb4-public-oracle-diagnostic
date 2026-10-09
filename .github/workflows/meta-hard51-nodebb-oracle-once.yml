@@ -1,0 +1,97 @@
+# LOCAL PROPOSAL ONLY: not committed, not run, and not an authorization to retry.
+# Intended target (only after normal GitHub write path is available):
+# .github/workflows/meta-hard51-nodebb-oracle-once.yml
+# Exact one-shot commit message: META HARD51 NodeBB oracle one-shot approved 2026-10-09
+# One-shot lease: the new research branch must be created at the pinned public
+# main commit below, then receive exactly ONE ordinary fast-forward commit
+# adding this workflow. No workflow_dispatch, schedule, rerun, or force-push.
+name: META HARD51 NodeBB oracle single attempt
+
+on:
+  push:
+    branches:
+      - research/meta-hard51-nodebb-oracle-once-20261009
+    paths:
+      - .github/workflows/meta-hard51-nodebb-oracle-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meta-hard51-nodebb-oracle-once
+  cancel-in-progress: false
+
+jobs:
+  nodebb-oracle:
+    if: >-
+      ${{ github.run_attempt == 1 &&
+          github.event.created == false &&
+          github.event.forced == false &&
+          github.event.before == '54de69f5713e406dd76bf602f8acf22750ff7ca8' &&
+          github.event.commits[0].id == github.sha &&
+          github.event.commits[1] == null &&
+          github.event.head_commit.message == 'META HARD51 NodeBB oracle one-shot approved 2026-10-09' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      BENCH_SHA: 66f92766bba642462d4bbe5479e83f91f9211862
+      TASK_ID: instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e
+      TASK_TOML_BLOB: 80dd482332c3a0e3daf46e536eb3ce7fe05a2daa
+
+    steps:
+      - name: Verify standard runner and Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS}" = Linux
+          python3 --version
+          docker info --format 'Docker server {{.ServerVersion}}'
+          df -h .
+
+      - name: Install pinned native Harbor 0.24.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/harbor-venv"
+          "$RUNNER_TEMP/harbor-venv/bin/pip" install --disable-pip-version-check --no-input 'harbor==0.24.0'
+          "$RUNNER_TEMP/harbor-venv/bin/harbor" --version
+
+      - name: Fetch only original frozen NodeBB source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init official
+          git -C official remote add origin https://github.com/scaleapi/SWE-bench_Pro-os.git
+          git -C official sparse-checkout init --cone
+          git -C official sparse-checkout set "v2/tasks/${TASK_ID}"
+          git -C official fetch --depth=1 --filter=blob:none origin "${BENCH_SHA}"
+          git -C official checkout --detach FETCH_HEAD
+          test "$(git -C official rev-parse HEAD)" = "${BENCH_SHA}"
+          test "$(git -C official hash-object "v2/tasks/${TASK_ID}/task.toml")" = "${TASK_TOML_BLOB}"
+          test -f "official/v2/tasks/${TASK_ID}/solution/solve.sh"
+
+      - name: Run ONE native Harbor oracle, no model API or retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd official
+          "$RUNNER_TEMP/harbor-venv/bin/harbor" run \
+            --path "v2/tasks/${TASK_ID}" \
+            --env docker \
+            --agent oracle \
+            --n-attempts 1 \
+            --max-retries 0 \
+            --n-concurrent 1 \
+            --job-name "meta-nodebb-oracle-${GITHUB_RUN_ID}"
+
+      - name: Print native trial result location (not an alternate score)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d official/jobs; then
+            find official/jobs -type f -name result.json -print -exec cat {} \;
+          else
+            echo 'No Harbor trial result directory; do not claim oracle PASS.'
+          fi
+          echo 'Only original native Harbor reward and exception fields can support oracle adjudication.'
