@@ -1,0 +1,123 @@
+# Owner conditional approval 2026-10-19: ONE public GitHub Actions no-provider integration run.
+# Official pinned Harbor only; released SDK v1.53; no user data/secrets, no model.
+name: Harbor OpenHands SDK v1.53 adapter offline one-shot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/harbor-openhands-sdk-adapter-no-model-once.yml
+
+permissions: {}
+concurrency:
+  group: harbor-openhands-sdk-v153-adapter-offline-once
+  cancel-in-progress: false
+
+jobs:
+  adapter-offline:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
+      GIT_TERMINAL_PROMPT: '0'
+      GIT_LFS_SKIP_SMUDGE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      DO_NOT_TRACK: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      OTEL_SDK_DISABLED: 'true'
+    steps:
+      - name: Verify one-shot identity, key absence and Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_RUN_NUMBER" = 1
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY LLM_API_KEY; do
+            if [ -n "$(printenv "$key" || true)" ]; then echo "REJECT_PROVIDER_ENV_$key"; exit 4; fi
+          done
+          test "$(docker info --format '{{.NCPU}}')" -ge 2
+          echo GATE_IDENTITY_AND_EMPTY_PROVIDER_KEYS_PASS
+
+      - name: Fetch frozen official Harbor source and verify adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q harbor-source
+          git -C harbor-source remote add origin https://github.com/harbor-framework/harbor.git
+          git -C harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$HARBOR_PIN"
+          git -C harbor-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C harbor-source rev-parse HEAD)" = "$HARBOR_PIN"
+          test -f harbor-source/src/harbor/agents/installed/openhands_sdk.py
+          test -f harbor-source/src/harbor/agents/installed/openhands_sdk_runner.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+          p = tomllib.loads(Path('harbor-source/pyproject.toml').read_text())
+          assert p['project']['version'] == '0.24.0'
+          print('HARBOR_OFFICIAL_PIN_AND_ADAPTER_PATH_PASS')
+          PY
+
+      - name: Build isolated SDK and Harbor in the same ephemeral Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --no-cache -t harbor-openhands-v153-no-model-once -f - . <<'DOCKERFILE'
+          FROM python:3.12-slim
+          ENV PYTHONDONTWRITEBYTECODE=1 \
+              PIP_DISABLE_PIP_VERSION_CHECK=1 \
+              DO_NOT_TRACK=1 \
+              HF_HUB_DISABLE_TELEMETRY=1 \
+              OTEL_SDK_DISABLED=true
+          COPY harbor-source /opt/harbor-source
+          RUN python -m pip install --no-input --no-cache-dir \
+              /opt/harbor-source openhands-sdk==1.53.0 openhands-tools==1.53.0 fastapi
+          DOCKERFILE
+          echo SDK_AND_HARBOR_SAME_CONTAINER_INSTALL_PASS
+
+      - name: Import actual adapter and runner with container network denied
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -i --network none --security-opt no-new-privileges \
+            -e OPENAI_API_KEY= -e ANTHROPIC_API_KEY= -e GEMINI_API_KEY= -e LLM_API_KEY= \
+            harbor-openhands-v153-no-model-once python - <<'PY'
+          import importlib.metadata as md
+          from harbor.agents.factory import AgentFactory
+          from harbor.models.agent.name import AgentName
+          from harbor.agents.installed.openhands_sdk import OpenHandsSDK, OpenHandsSDKOptions
+          from openhands.sdk import LLM, Agent, AgentContext, Conversation, Tool
+          from openhands.tools.file_editor import FileEditorTool
+          from openhands.tools.task_tracker import TaskTrackerTool
+          from openhands.tools.terminal import TerminalTool
+          assert md.version('openhands-sdk') == '1.53.0'
+          assert md.version('openhands-tools') == '1.53.0'
+          assert AgentFactory.get_agent_class(AgentName.OPENHANDS_SDK) is OpenHandsSDK
+          assert OpenHandsSDKOptions().python_version == '3.12'
+          assert all(x is not None for x in [LLM, Agent, AgentContext, Conversation, Tool,
+                                             FileEditorTool, TaskTrackerTool, TerminalTool])
+          print('HARBOR_FACTORY_TO_SDK_IMPORT_PASS')
+          print('NO_NETWORK_NO_MODEL_NO_SECRET_ENV_PASS')
+          PY
+          docker run --rm --network none --security-opt no-new-privileges \
+            -e OPENAI_API_KEY= -e ANTHROPIC_API_KEY= -e GEMINI_API_KEY= -e LLM_API_KEY= \
+            harbor-openhands-v153-no-model-once \
+            python /opt/harbor-source/src/harbor/agents/installed/openhands_sdk_runner.py --help \
+            > sdk_runner_help.txt
+          grep -F -- '--instruction-file' sdk_runner_help.txt >/dev/null
+          echo ACTUAL_HARBOR_OPENHANDS_RUNNER_IMPORT_AND_CLI_PASS
+
+      - name: Minimal public result summary (zero artifacts)
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' \
+            '## Public-only Harbor and OpenHands SDK 1.53 no-model integration smoke' \
+            'Official Harbor commit: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0' \
+            'Python 3.12 Docker; SDK/tools 1.53.0; network denied during runtime verification.' \
+            'No provider API, model, secret, score, private data, artifacts or cache.' \
+            'An import/CLI pass does not establish agent-task performance.' \
+            'Do not rerun after failure or ambiguous effect without new scoped approval.' \
+            >> "$GITHUB_STEP_SUMMARY"
