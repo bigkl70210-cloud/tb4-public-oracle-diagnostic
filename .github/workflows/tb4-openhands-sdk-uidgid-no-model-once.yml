@@ -1,0 +1,149 @@
+# Owner conditional approval 2026-10-19: one free standard public-hosted runner, no model.
+name: TB4 OpenHands UID GID native SDK no-model one-shot
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tb4-openhands-sdk-uidgid-no-model-once.yml
+permissions: {}
+concurrency:
+  group: tb4-oh-sdk-uidgid-20261019
+  cancel-in-progress: false
+jobs:
+  uidgid:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
+      TB_PIN: 2e29ca91d5f1cb6fb60924bf867acc755565c044
+      GIT_TERMINAL_PROMPT: '0'
+      GIT_LFS_SKIP_SMUDGE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      DO_NOT_TRACK: '1'
+      OTEL_SDK_DISABLED: 'true'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    steps:
+      - name: Public standard runner and no-provider guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_NUMBER" = 1
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/main
+          for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY LLM_API_KEY; do
+            test -z "$(printenv "$key" || true)"
+          done
+          test "$(docker info --format '{{.NCPU}}')" -ge 2
+          echo ZERO_MODEL_KEY_AND_ONE_SHOT_PASS
+      - name: Pin official Harbor and Terminal Bench task
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q harbor-source
+          git -C harbor-source remote add origin https://github.com/harbor-framework/harbor.git
+          git -C harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$HARBOR_PIN"
+          git -C harbor-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C harbor-source rev-parse HEAD)" = "$HARBOR_PIN"
+          git init -q tb-source
+          git -C tb-source remote add origin https://github.com/harbor-framework/terminal-bench.git
+          git -C tb-source sparse-checkout init --cone
+          git -C tb-source sparse-checkout set tasks/risk-scorer-replay
+          git -C tb-source fetch --quiet --depth=1 --filter=blob:none origin "$TB_PIN"
+          git -C tb-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C tb-source rev-parse HEAD)" = "$TB_PIN"
+          grep -Fx 'USER nobody' tb-source/tasks/risk-scorer-replay/environment/Dockerfile
+          if grep -q '^user[[:space:]]*=' tb-source/tasks/risk-scorer-replay/task.toml; then exit 18; fi
+          test -f harbor-source/src/harbor/agents/installed/openhands_sdk_runner.py
+          echo SOURCE_PIN_AND_TASK_IDENTITY_PASS
+      - name: Apply narrow UID GID fix to frozen adapter and compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+          p=Path('harbor-source/src/harbor/agents/installed/openhands_sdk.py')
+          s=p.read_text()
+          old='''            agent_user = environment.default_user or "root"
+            await self.exec_as_root(
+                environment,
+                command=f"mkdir -p /opt/openhands-sdk-venv && chown {agent_user}:{agent_user} /opt/openhands-sdk-venv",
+            )'''
+          new='''            uid_result = await self.exec_as_agent(environment, command="id -u")
+            gid_result = await self.exec_as_agent(environment, command="id -g")
+            uid = str(uid_result.stdout).strip()
+            gid = str(gid_result.stdout).strip()
+            if not (uid.isascii() and uid.isdecimal() and gid.isascii() and gid.isdecimal()):
+                raise ValueError("Agent UID/GID must be ASCII decimal.")
+            await self.exec_as_root(
+                environment,
+                command=f"mkdir -p /opt/openhands-sdk-venv && chown {uid}:{gid} /opt/openhands-sdk-venv",
+            )'''
+          assert s.count(old)==1, 'upstream adapter changed; abort'
+          fixed=s.replace(old,new)
+          ast.parse(fixed)
+          p.write_text(fixed)
+          print('PINNED_HARBOR_UID_GID_PATCH_SYNTAX_PASS')
+          PY
+      - name: Build unmodified official task Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 250 docker build --progress=plain -t tb4-risk-uidgid -f tb-source/tasks/risk-scorer-replay/environment/Dockerfile tb-source/tasks/risk-scorer-replay/environment
+          test "$(docker image inspect tb4-risk-uidgid --format '{{.Config.User}}')" = nobody
+          echo OFFICIAL_TASK_DOCKER_IMAGE_USER_PASS
+      - name: Native UID failure reproduction and actual SDK install
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -d --name tb4-oh-uid-once \
+            -e OPENAI_API_KEY= -e ANTHROPIC_API_KEY= -e GEMINI_API_KEY= -e LLM_API_KEY= \
+            tb4-risk-uidgid sleep 590
+          trap 'docker rm -f tb4-oh-uid-once >/dev/null 2>&1 || true' EXIT
+          uid="$(docker exec tb4-oh-uid-once id -u)"
+          gid="$(docker exec tb4-oh-uid-once id -g)"
+          test "$uid:$gid" = '65534:65534'
+          test "$(docker exec tb4-oh-uid-once id -un)" = nobody
+          echo TASK_DEFAULT_UID_GID_PASS
+          docker exec -u root tb4-oh-uid-once sh -c 'mkdir -p /opt/openhands-sdk-venv && chown root:root /opt/openhands-sdk-venv'
+          if docker exec tb4-oh-uid-once touch /opt/openhands-sdk-venv/must-fail 2>/dev/null; then
+            echo ORIGINAL_OWNER_BUG_NOT_REPRODUCED; exit 21
+          fi
+          echo ROOT_OWNER_WRITABILITY_FAILURE_CONFIRMED
+          if docker exec -u root tb4-oh-uid-once chown nobody:nobody /opt/openhands-sdk-venv 2>/dev/null; then
+            echo UNEXPECTED_NOBODY_GROUP; exit 22
+          fi
+          echo NAME_GROUP_FAILURE_CONFIRMED
+          docker exec -u root tb4-oh-uid-once chown "$uid:$gid" /opt/openhands-sdk-venv
+          docker exec tb4-oh-uid-once sh -c 'touch /opt/openhands-sdk-venv/ok && test -f /opt/openhands-sdk-venv/ok'
+          echo NUMERIC_OWNERSHIP_WRITABILITY_PASS
+          timeout 160 docker exec -u root tb4-oh-uid-once sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates coreutils >/dev/null'
+          timeout 280 docker exec tb4-oh-uid-once bash -c '
+            set -euo pipefail
+            test -z "$OPENAI_API_KEY$ANTHROPIC_API_KEY$GEMINI_API_KEY$LLM_API_KEY"
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            if [ -f "$HOME/.local/bin/env" ]; then source "$HOME/.local/bin/env"; fi
+            uv python install 3.12
+            uv venv /opt/openhands-sdk-venv --python 3.12 --clear
+            source /opt/openhands-sdk-venv/bin/activate
+            uv pip install --quiet openhands-sdk==1.53.0 openhands-tools==1.53.0 fastapi
+            python -c "from openhands.sdk import LLM,Agent; import importlib.metadata as m; assert m.version(\"openhands-sdk\")==\"1.53.0\""
+          '
+          echo ACTUAL_TASK_IMAGE_SDK_V153_INSTALL_IMPORT_PASS
+          docker exec -u root tb4-oh-uid-once mkdir -p /installed-agent
+          docker cp harbor-source/src/harbor/agents/installed/openhands_sdk_runner.py tb4-oh-uid-once:/installed-agent/run_agent.py
+          docker exec -u root tb4-oh-uid-once chmod 755 /installed-agent/run_agent.py
+          docker exec tb4-oh-uid-once /opt/openhands-sdk-venv/bin/python /installed-agent/run_agent.py --help > runner-help.txt
+          grep -F -- '--instruction-file' runner-help.txt >/dev/null
+          echo OFFICIAL_HARBOR_RUNNER_CLI_MODEL_FREE_PASS
+      - name: Minimal step summary no uploaded artifacts
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' \
+            'Standard GitHub-hosted Ubuntu runner in public repo; no paid larger runner.' \
+            'No provider credentials, no model/task solver/verifier score.' \
+            'Source pinned; native task-image UID/GID and SDK install receipts appear above.' \
+            'Any failure has NO model-quality implication; never rerun without new grant.' \
+            >> "$GITHUB_STEP_SUMMARY"
