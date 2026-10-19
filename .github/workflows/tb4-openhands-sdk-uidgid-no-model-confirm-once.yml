@@ -1,0 +1,165 @@
+# One authorized public-repo STANDARD GitHub-hosted runner: expected GitHub Actions charge $0.
+# One no-model/no-provider native task-image integration smoke. No artifacts/cache/secrets.
+name: TB4 OpenHands SDK UID/GID native model-free one-shot
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tb4-openhands-sdk-uidgid-no-model-confirm-once.yml
+permissions: {}
+concurrency:
+  group: tb4-openhands-sdk-uidgid-no-model-confirm-20261019
+  cancel-in-progress: false
+jobs:
+  native-uidgid:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      HARBOR_PIN: 4b94505a91c5ddcb70b5740ac95718ddee13e5a0
+      TB_PIN: 2e29ca91d5f1cb6fb60924bf867acc755565c044
+      GIT_TERMINAL_PROMPT: '0'
+      GIT_LFS_SKIP_SMUDGE: '1'
+      DO_NOT_TRACK: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      OTEL_SDK_DISABLED: 'true'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Identity and zero-provider-cost fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_NUMBER" = 1
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_EVENT_NAME" = push
+          for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY LLM_API_KEY; do
+            test -z "$(printenv "$key" || true)"
+          done
+          test "$(docker info --format '{{.NCPU}}')" -ge 2
+          echo ONE_PUBLIC_STANDARD_RUNNER_NO_MODEL_KEYS_PASS
+
+      - name: Acquire exact upstream Harbor and Terminal-Bench source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q harbor-source
+          git -C harbor-source remote add origin https://github.com/harbor-framework/harbor.git
+          git -C harbor-source fetch --quiet --depth=1 --filter=blob:none origin "$HARBOR_PIN"
+          git -C harbor-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C harbor-source rev-parse HEAD)" = "$HARBOR_PIN"
+          git init -q tb-source
+          git -C tb-source remote add origin https://github.com/harbor-framework/terminal-bench.git
+          git -C tb-source sparse-checkout init --cone
+          git -C tb-source sparse-checkout set tasks/risk-scorer-replay
+          git -C tb-source fetch --quiet --depth=1 --filter=blob:none origin "$TB_PIN"
+          git -C tb-source checkout --quiet --detach FETCH_HEAD
+          test "$(git -C tb-source rev-parse HEAD)" = "$TB_PIN"
+          test -f harbor-source/src/harbor/agents/installed/openhands_sdk_runner.py
+          grep -Fx 'USER nobody' tb-source/tasks/risk-scorer-replay/environment/Dockerfile
+          if grep -q '^user[[:space:]]*=' tb-source/tasks/risk-scorer-replay/task.toml; then
+            echo UNEXPECTED_EXPLICIT_TASK_AGENT_USER; exit 18
+          fi
+          echo SOURCE_PINS_AND_NATIVE_TASK_IDENTITY_PASS
+
+      - name: Exact pinned Harbor source-patch compile and guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+          p=Path('harbor-source/src/harbor/agents/installed/openhands_sdk.py')
+          source=p.read_text()
+          anchor='agent_user = environment.default_user or "root"'
+          assert source.count(anchor)==1, 'pinned Harbor owner anchor mismatch'
+          pos=source.index(anchor)
+          start=source.rfind('\n',0,pos)+1
+          end=source.index('            # Install SDK via uv',pos)
+          replaced=source[start:end]
+          assert replaced.count('chown {agent_user}:{agent_user}')==1
+          assert replaced.count('await self.exec_as_root(')==1
+          target_lines=[
+              'uid_result = await self.exec_as_agent(environment, command="id -u")',
+              'gid_result = await self.exec_as_agent(environment, command="id -g")',
+              'uid = str(uid_result.stdout).strip()',
+              'gid = str(gid_result.stdout).strip()',
+              'if not (uid.isascii() and uid.isdecimal() and gid.isascii() and gid.isdecimal()):',
+              '    raise ValueError("Agent UID/GID must be ASCII decimal.")',
+              'await self.exec_as_root(',
+              '    environment,',
+              '    command=f"mkdir -p /opt/openhands-sdk-venv && chown {uid}:{gid} /opt/openhands-sdk-venv",',
+              ')',
+          ]
+          body=''.join('            '+line+'\n' for line in target_lines)
+          patched=source[:start]+body+source[end:]
+          ast.parse(patched)
+          p.write_text(patched)
+          print('HARBOR_PINNED_ADAPTER_UID_GID_PATCH_SYNTAX_PASS')
+          PY
+
+      - name: Build unchanged official TB task image
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 250 docker build --progress=plain -t tb4-risk-scorer-uidgid -f tb-source/tasks/risk-scorer-replay/environment/Dockerfile tb-source/tasks/risk-scorer-replay/environment
+          test "$(docker image inspect tb4-risk-scorer-uidgid --format '{{.Config.User}}')" = nobody
+          echo OFFICIAL_UNCHANGED_TASK_IMAGE_USER_PASS
+
+      - name: Test actual default USER and run pinned SDK with numerical owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name tb4-uidgid-only --rm \
+            -e OPENAI_API_KEY= -e ANTHROPIC_API_KEY= -e GEMINI_API_KEY= -e LLM_API_KEY= \
+            tb4-risk-scorer-uidgid sleep 590
+          trap 'docker rm -f tb4-uidgid-only >/dev/null 2>&1 || true' EXIT
+          uid="$(docker exec tb4-uidgid-only id -u)"
+          gid="$(docker exec tb4-uidgid-only id -g)"
+          test "$uid:$gid" = '65534:65534'
+          test "$(docker exec tb4-uidgid-only id -un)" = nobody
+          echo OFFICIAL_TASK_IMAGE_EFFECTIVE_USER_65534_65534_PASS
+          docker exec -u root tb4-uidgid-only sh -c 'mkdir -p /opt/openhands-sdk-venv && chown root:root /opt/openhands-sdk-venv'
+          if docker exec tb4-uidgid-only sh -c 'touch /opt/openhands-sdk-venv/should-fail' 2>/dev/null; then
+            echo ORIGINAL_ROOT_OWNER_GUARD_UNEXPECTED_WRITE; exit 19
+          fi
+          echo ORIGINAL_ROOT_ROOT_INSTALL_WRITABILITY_FAIL_CONFIRMED
+          if docker exec -u root tb4-uidgid-only chown nobody:nobody /opt/openhands-sdk-venv 2>/dev/null; then
+            echo ASSUMED_NOBODY_NOBODY_GROUP_UNEXPECTEDLY_FOUND; exit 20
+          fi
+          echo NAME_GROUP_MISMATCH_CONFIRMED
+          docker exec -u root tb4-uidgid-only chown "$uid:$gid" /opt/openhands-sdk-venv
+          docker exec tb4-uidgid-only sh -c 'touch /opt/openhands-sdk-venv/test-ok && test -f /opt/openhands-sdk-venv/test-ok'
+          echo NUMERIC_UID_GID_REAL_TASK_CONTAINER_WRITABILITY_PASS
+          # System dependencies are installed as root just as Harbor ensure_system_dependencies.
+          timeout 160 docker exec -u root tb4-uidgid-only sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates coreutils >/dev/null'
+          timeout 280 docker exec tb4-uidgid-only bash -c '
+            set -euo pipefail
+            test -z "$OPENAI_API_KEY$ANTHROPIC_API_KEY$GEMINI_API_KEY$LLM_API_KEY"
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            if [ -f "$HOME/.local/bin/env" ]; then source "$HOME/.local/bin/env"; fi
+            uv python install 3.12
+            uv venv /opt/openhands-sdk-venv --python 3.12 --clear
+            source /opt/openhands-sdk-venv/bin/activate
+            uv pip install --quiet openhands-sdk==1.53.0 openhands-tools==1.53.0 fastapi
+            python -c "from openhands.sdk import LLM,Agent; import importlib.metadata as m; assert m.version(\"openhands-sdk\")==\"1.53.0\""
+          '
+          echo OFFICIAL_TASK_IMAGE_REAL_SDK_V153_INSTALL_AND_IMPORT_PASS
+          docker exec -u root tb4-uidgid-only mkdir -p /installed-agent
+          docker cp harbor-source/src/harbor/agents/installed/openhands_sdk_runner.py tb4-uidgid-only:/installed-agent/run_agent.py
+          docker exec -u root tb4-uidgid-only chmod 755 /installed-agent/run_agent.py
+          docker exec tb4-uidgid-only /opt/openhands-sdk-venv/bin/python /installed-agent/run_agent.py --help > runner-help.txt
+          grep -F -- '--instruction-file' runner-help.txt >/dev/null
+          echo OFFICIAL_HARBOR_COPIED_RUNNER_NATIVE_CLI_NO_MODEL_PASS
+
+      - name: Bounded receipt only, no artifact upload
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' \
+            'No API keys, no models, no trial solver or official task scoring.' \
+            'Standard ubuntu-24.04 GitHub-hosted runner on public repository.' \
+            'Source pins and individual native gates shown in job logs.' \
+            'An SDK import/CLI pass does not establish agent performance.' \
+            'NO RERUN without a separate new grant.' \
+            >> "$GITHUB_STEP_SUMMARY"
